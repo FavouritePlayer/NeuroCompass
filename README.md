@@ -2,6 +2,8 @@
 
 Native macOS menu-bar utility that draws a **click-through, full-screen overlay** with a **shared nonuniform gradient** controlling dimming and optional image metrics (contrast, saturation, sharpness, warmth).
 
+**NeuroCompass** (cued-attention MVP + calibration loop) lives in [`NeuroCompass/`](NeuroCompass/README.md). The loop drives left-side contrast by writing `~/Library/Application Support/ScreenShade/loop.json` (polled by `LoopCommandWatcher`).
+
 > Overlay dimming cannot make pixels brighter than the panel’s native output. “Bright side” means the start of the shared gradient (usually less processed / less dimmed).
 
 ## Features
