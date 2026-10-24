@@ -1,6 +1,9 @@
 build/
+**/build/
 .DS_Store
 *.swp
 xcuserdata/
 *.xcuserstate
 DerivedData/
+*.app/
+.idea/
