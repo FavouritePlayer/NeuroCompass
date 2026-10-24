@@ -21,6 +21,10 @@ swiftc -sdk "$SDK" \
   -target arm64-apple-macos13.0 \
   -framework AppKit \
   -framework QuartzCore \
+  -framework ScreenCaptureKit \
+  -framework CoreImage \
+  -framework CoreMedia \
+  -framework CoreVideo \
   -O \
   -o "$MACOS/ScreenShade" \
   "${SWIFT_FILES[@]}"

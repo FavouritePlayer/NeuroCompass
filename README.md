@@ -1,32 +1,38 @@
 # ScreenShade
 
-Native macOS menu-bar utility that draws a **click-through, full-screen overlay** with a **nonuniform brightness gradient** (relative dimming). Bright and dim regions are adjustable live — direction, split position, strength, and transition falloff.
+Native macOS menu-bar utility that draws a **click-through, full-screen overlay** with a **shared nonuniform gradient** controlling dimming and optional image metrics (contrast, saturation, sharpness, warmth).
 
-> Overlay dimming cannot make pixels brighter than the panel’s native output. “Bright” means *less dimmed*; “dim” means a stronger black alpha overlay.
+> Overlay dimming cannot make pixels brighter than the panel’s native output. “Bright side” means the start of the shared gradient (usually less processed / less dimmed).
 
 ## Features
 
-- Full-screen overlay on **all displays**
-- Click-through (`ignoresMouseEvents`) so other apps stay usable
-- Stays above normal windows; **hidden from Dock / Cmd-Tab** (`LSUIElement`)
-- Gradient axis by **angle** (horizontal, vertical, or arbitrary)
-- **Split / center** position for the bright↔dim boundary
-- **Bright opacity** and **dim opacity** (strength)
-- **Transition / falloff modes** (first-class):
-  | Mode | Behavior |
-  |---|---|
-  | **Hard** | Sharp cutoff (step edge) at the split |
-  | **Short** | Narrow soft ramp |
-  | **Long** | Wide soft ramp across much of the screen |
-  | **Custom** | Continuous **transition width** between hard and long |
-- Live settings panel + menu-bar presets
-- Persists to `~/Library/Application Support/ScreenShade/config.json` (and `UserDefaults`)
+- Full-screen overlay on **all displays**, click-through, hidden from Dock / Cmd-Tab (`LSUIElement`)
+- **One shared gradient geometry** drives every metric:
+  - Angle / direction
+  - Split / center
+  - Transition falloff: **Hard / Short / Long / Custom** (+ continuous width)
+  - Invert (swap sides)
+- **Dimming** via cheap `CAGradientLayer` (no Screen Recording permission)
+- **Metric channels** (Screen Recording + Core Image):
+  | Metric | Range | Notes |
+  |---|---|---|
+  | Contrast | −1…1 per side | `CIColorControls` |
+  | Saturation | −1…1 per side | `CIColorControls` |
+  | Sharpness | −1…1 per side | Unsharp mask (+) / Gaussian blur (−) |
+  | Warmth | −1…1 per side | `CITemperatureAndTint` (bonus) |
+- Each metric: **enable** + **start (bright side)** + **end (dim side)** amounts
+- Live settings panel + menu-bar presets; persists to `config.json`
+
+### Geometry model
+
+All enabled metrics share the **same** angle, center, transition mode/width, and invert. Per-metric splits are not exposed (keeps the UI coherent). Dual filtered frames are blended with a mask built from that shared gradient.
 
 ## Requirements
 
 - macOS 13+
-- Apple Silicon or Intel Mac
-- **Either** Xcode, **or** Command Line Tools (`xcode-select --install`) — this repo builds with `swiftc` without a full Xcode.app
+- Command Line Tools **or** Xcode (`swiftc` build path supported)
+- **Screen Recording** permission only when contrast / saturation / sharpness / warmth are enabled  
+  (System Settings → Privacy & Security → Screen Recording → ScreenShade)
 
 ## Build
 
@@ -38,57 +44,29 @@ chmod +x Scripts/build.sh
 
 Output: `build/ScreenShade.app`
 
-### Open / build in Xcode (optional)
-
-If you have Xcode installed, you can also create a macOS App target and add the sources under `Sources/ScreenShade/` plus `Resources/Info.plist`, or:
-
-```bash
-# From an Xcode-generated project wrapping these sources:
-xcodebuild -scheme ScreenShade -configuration Release
-```
-
-The included `Scripts/build.sh` path is the supported one on machines with only Command Line Tools.
-
 ## Run
 
 ```bash
 open build/ScreenShade.app
 ```
 
-On launch:
+1. Menu-bar icon appears; settings panel opens
+2. Adjust shared gradient (angle, split, Hard/Short/Long/Custom)
+3. Enable metric channels as needed (macOS will prompt for Screen Recording the first time)
+4. Use **Demo metrics** for a ready-made left→right contrast / sat / sharp / warmth ramp
 
-1. A menu-bar icon appears (half-filled circle)
-2. The settings panel opens
-3. The overlay covers the screen(s)
+Quit: menu bar → **Quit ScreenShade**.
 
-Use **Left bright** / **Right bright** presets, or adjust sliders — changes apply immediately.
+### Offline metric demos (no permission)
 
-Quit from the menu-bar menu → **Quit ScreenShade**.
-
-## Settings
-
-| Control | Meaning |
-|---|---|
-| Enable overlay | Show / hide shade |
-| Invert | Swap bright and dim sides |
-| Angle | Gradient direction (0° = left→right, 90° = top→bottom) |
-| Split / center | Where the transition sits (0…1) |
-| Bright opacity | Overlay alpha on the bright side (usually 0) |
-| Dim opacity | Overlay alpha on the dim side (strength) |
-| Transition mode | **Hard** / **Short** / **Long** / **Custom** |
-| Transition width | Continuous step size (0 = hard, ~0.12 = short, ~0.75 = long) |
-
-Choosing a named mode sets width to that preset. Dragging the width slider switches to **Custom** (or snaps back to a named mode when you land on a preset value).
-
-### Config file / CLI without rebuilding
-
-Edit:
-
-```text
-~/Library/Application Support/ScreenShade/config.json
+```bash
+screencapture /tmp/src.png
+swift Scripts/render-metric-demos.swift /tmp/src.png ./demo-out
 ```
 
-Example:
+## Config
+
+`~/Library/Application Support/ScreenShade/config.json`
 
 ```json
 {
@@ -96,31 +74,34 @@ Example:
   "angleDegrees": 0,
   "center": 0.5,
   "brightOpacity": 0,
-  "dimOpacity": 0.6,
-  "transitionMode": "hard",
-  "transitionWidth": 0,
-  "inverted": false
+  "dimOpacity": 0.55,
+  "transitionMode": "short",
+  "transitionWidth": 0.12,
+  "inverted": false,
+  "contrast":   { "enabled": true,  "start": 0.0,  "end": 0.55 },
+  "saturation": { "enabled": true,  "start": 0.15, "end": -0.55 },
+  "sharpness":  { "enabled": true,  "start": 0.35, "end": -0.35 },
+  "warmth":     { "enabled": false, "start": 0.0,  "end": 0.25 }
 }
 ```
 
-`transitionMode` values: `"hard"` | `"short"` | `"long"` | `"custom"`.
-
-Then choose **Reload config.json** from the menu bar (or restart the app).
-
-A sample file also lives at `config/config.json` in the repo.
+`transitionMode`: `"hard"` | `"short"` | `"long"` | `"custom"`.  
+Reload via menu bar → **Reload config.json**.
 
 ## Project layout
 
 ```text
 ScreenShade/
-  Sources/ScreenShade/   Swift + AppKit sources
-  Resources/Info.plist   LSUIElement overlay utility plist
-  Scripts/build.sh       swiftc → .app bundle
-  config/config.json     sample settings
+  Sources/ScreenShade/   AppKit + ScreenCaptureKit + Core Image
+  Resources/Info.plist
+  Scripts/build.sh
+  Scripts/render-metric-demos.swift
+  config/config.json
   README.md
 ```
 
 ## Notes
 
-- Implementation uses `CAGradientLayer` (Core Animation) for a solid, live-updating axial gradient. Full Xcode’s `metal` toolchain is not required.
-- True panel brightening above native luminance is not possible with a software overlay; this app does relative nonuniform dimming.
+- Dimming-only path needs no capture permission.
+- Advanced metrics capture the display (excluding the overlay), filter start/end variants, and blend with the shared mask (~12 fps).
+- If Screen Recording is denied, metric toggles turn off and dimming continues to work.

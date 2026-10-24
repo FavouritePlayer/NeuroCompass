@@ -26,5 +26,7 @@
 	<true/>
 	<key>NSPrincipalClass</key>
 	<string>NSApplication</string>
+	<key>NSScreenCaptureUsageDescription</key>
+	<string>ScreenShade needs Screen Recording to apply spatially varying contrast, saturation, and sharpness across your display. Dimming alone does not require this permission.</string>
 </dict>
 </plist>

@@ -3,13 +3,9 @@ import AppKit
 
 /// How the bright↔dim boundary falls off across the screen.
 enum TransitionMode: String, Codable, CaseIterable {
-    /// Sharp cutoff (step edge) between bright and dim.
     case hard
-    /// Narrow soft ramp.
     case short
-    /// Wide soft ramp across much of the screen.
     case long
-    /// User-dialed continuous transition width.
     case custom
 
     var displayName: String {
@@ -21,7 +17,6 @@ enum TransitionMode: String, Codable, CaseIterable {
         }
     }
 
-    /// Preset transition width (0 = hard step, 1 = full-screen ramp).
     var presetWidth: Double {
         switch self {
         case .hard: return 0
@@ -38,33 +33,53 @@ enum TransitionMode: String, Codable, CaseIterable {
     }
 }
 
+/// One metric mapped across the shared gradient (start = bright side, end = dim side).
+struct MetricChannel: Equatable, Codable {
+    var enabled: Bool = false
+    /// Amount on the bright / start side of the gradient.
+    var start: Double = 0
+    /// Amount on the dim / end side of the gradient.
+    var end: Double = 0
+
+    static func disabled(start: Double = 0, end: Double = 0) -> MetricChannel {
+        MetricChannel(enabled: false, start: start, end: end)
+    }
+
+    mutating func clamp(minValue: Double, maxValue: Double) {
+        start = min(max(start, minValue), maxValue)
+        end = min(max(end, minValue), maxValue)
+    }
+}
+
 /// Controllable parameters for the nonuniform shade overlay.
+///
+/// **Geometry model:** one shared gradient (angle, center/split, transition mode/width, invert)
+/// drives every enabled metric — dimming, contrast, saturation, sharpness, and warmth.
 struct ShadeSettings: Equatable, Codable {
-    /// When false, overlay windows are hidden.
     var enabled: Bool = true
 
-    /// Gradient axis in degrees. 0° = left→right (start → end), 90° = top→bottom.
+    // MARK: Shared gradient geometry
     var angleDegrees: Double = 0
-
-    /// Position of the bright/dark transition along the axis, 0…1.
     var center: Double = 0.5
+    var transitionMode: TransitionMode = .short
+    var transitionWidth: Double = TransitionMode.short.presetWidth
+    var inverted: Bool = false
 
+    // MARK: Dimming (cheap path; no screen capture)
     /// Overlay opacity on the bright side (0 = no dimming).
     var brightOpacity: Double = 0.0
-
     /// Overlay opacity on the dim side (higher = darker).
     var dimOpacity: Double = 0.55
 
-    /// Falloff mode: hard / short / long presets, or custom width.
-    var transitionMode: TransitionMode = .short
-
-    /// Continuous transition width / step size, 0 (hard) … 1 (longest).
-    /// Preset modes set this; dragging the slider switches mode to `.custom`
-    /// unless the value lands exactly on a preset.
-    var transitionWidth: Double = TransitionMode.short.presetWidth
-
-    /// Swap bright and dim sides without changing angle.
-    var inverted: Bool = false
+    // MARK: Advanced metrics (ScreenCaptureKit + Core Image; shared geometry)
+    /// Contrast: -1…1 (0 = unchanged). Needs screen capture.
+    var contrast: MetricChannel = .disabled(start: 0, end: 0.35)
+    /// Saturation: -1…1 (0 = unchanged). Needs screen capture.
+    var saturation: MetricChannel = .disabled(start: 0, end: -0.45)
+    /// Sharpness: -1…1 (negative = soften/blur, positive = sharpen). Needs screen capture.
+    var sharpness: MetricChannel = .disabled(start: 0, end: 0.4)
+    /// Warmth: -1…1 (cool ↔ warm). Needs screen capture. Optional bonus metric.
+    var warmth: MetricChannel = .disabled(start: 0, end: 0.25)
 
     static let defaultsKey = "shadeSettings"
     static let configFileName = "config.json"
@@ -78,14 +93,25 @@ struct ShadeSettings: Equatable, Codable {
         supportDirectory.appendingPathComponent(configFileName)
     }
 
-    /// Effective width used for color stops (respects mode presets).
+    /// True when any metric requires capturing and filtering the display.
+    var needsScreenCapture: Bool {
+        contrast.enabled || saturation.enabled || sharpness.enabled || warmth.enabled
+    }
+
     var effectiveTransitionWidth: Double {
         switch transitionMode {
-        case .hard, .short, .long:
-            return transitionMode.presetWidth
-        case .custom:
-            return transitionWidth
+        case .hard, .short, .long: return transitionMode.presetWidth
+        case .custom: return transitionWidth
         }
+    }
+
+    /// Start/end amounts for a channel, respecting invert (swap sides).
+    func oriented(_ channel: MetricChannel) -> (start: Double, end: Double) {
+        inverted ? (channel.end, channel.start) : (channel.start, channel.end)
+    }
+
+    func orientedDimOpacities() -> (start: Double, end: Double) {
+        inverted ? (dimOpacity, brightOpacity) : (brightOpacity, dimOpacity)
     }
 
     mutating func applyTransitionMode(_ mode: TransitionMode) {
@@ -95,7 +121,6 @@ struct ShadeSettings: Equatable, Codable {
         }
     }
 
-    /// After the user moves the width slider, snap to a named mode or mark custom.
     mutating func applyTransitionWidth(_ width: Double) {
         let w = min(max(width, 0), 1)
         transitionWidth = w
@@ -119,29 +144,28 @@ struct ShadeSettings: Equatable, Codable {
         brightOpacity = min(max(brightOpacity, 0), 0.95)
         dimOpacity = min(max(dimOpacity, 0), 0.95)
         transitionWidth = min(max(transitionWidth, 0), 1)
+        contrast.clamp(minValue: -1, maxValue: 1)
+        saturation.clamp(minValue: -1, maxValue: 1)
+        sharpness.clamp(minValue: -1, maxValue: 1)
+        warmth.clamp(minValue: -1, maxValue: 1)
         var a = angleDegrees.truncatingRemainder(dividingBy: 360)
         if a < 0 { a += 360 }
         angleDegrees = a
-        // Keep width aligned with named presets.
         if transitionMode != .custom {
             transitionWidth = transitionMode.presetWidth
         }
     }
 
-    /// Start/end colors for a black overlay gradient (alpha = opacity).
     func gradientColors() -> (start: NSColor, end: NSColor) {
-        let bright = inverted ? dimOpacity : brightOpacity
-        let dim = inverted ? brightOpacity : dimOpacity
+        let (bright, dim) = orientedDimOpacities()
         return (
             NSColor(white: 0, alpha: CGFloat(bright)),
             NSColor(white: 0, alpha: CGFloat(dim))
         )
     }
 
-    /// Color-stop locations for center + effective transition width.
     func colorLocations() -> [NSNumber] {
         let width = effectiveTransitionWidth
-        // Hard / near-hard: tiny epsilon so CAGradientLayer still draws a step.
         if width <= 0.001 {
             let c = min(max(center, 0.001), 0.999)
             return [0, NSNumber(value: c), NSNumber(value: c), 1]
@@ -161,13 +185,21 @@ struct ShadeSettings: Equatable, Codable {
         return [start, start, end, end]
     }
 
-    /// Unit vector of the gradient direction (AppKit y-up for layer start/end points).
+    /// Mask stops: black (0) on start/bright side → white (1) on end/dim side.
+    func maskColorsForStops() -> [NSColor] {
+        [
+            NSColor(white: 0, alpha: 1),
+            NSColor(white: 0, alpha: 1),
+            NSColor(white: 1, alpha: 1),
+            NSColor(white: 1, alpha: 1)
+        ]
+    }
+
     func directionVector() -> CGPoint {
         let rad = angleDegrees * .pi / 180
         return CGPoint(x: cos(rad), y: -sin(rad))
     }
 
-    /// CAGradientLayer start/end points in unit space for the given angle.
     func gradientPoints() -> (start: CGPoint, end: CGPoint) {
         let d = directionVector()
         let start = CGPoint(x: 0.5 - d.x * 0.5, y: 0.5 - d.y * 0.5)
@@ -175,10 +207,10 @@ struct ShadeSettings: Equatable, Codable {
         return (start, end)
     }
 
-    // Migrate older configs that used `softness` instead of transition fields.
     enum CodingKeys: String, CodingKey {
         case enabled, angleDegrees, center, brightOpacity, dimOpacity
         case transitionMode, transitionWidth, inverted, softness
+        case contrast, saturation, sharpness, warmth
     }
 
     init() {}
@@ -191,12 +223,15 @@ struct ShadeSettings: Equatable, Codable {
         brightOpacity = try c.decodeIfPresent(Double.self, forKey: .brightOpacity) ?? 0
         dimOpacity = try c.decodeIfPresent(Double.self, forKey: .dimOpacity) ?? 0.55
         inverted = try c.decodeIfPresent(Bool.self, forKey: .inverted) ?? false
+        contrast = try c.decodeIfPresent(MetricChannel.self, forKey: .contrast) ?? .disabled(start: 0, end: 0.35)
+        saturation = try c.decodeIfPresent(MetricChannel.self, forKey: .saturation) ?? .disabled(start: 0, end: -0.45)
+        sharpness = try c.decodeIfPresent(MetricChannel.self, forKey: .sharpness) ?? .disabled(start: 0, end: 0.4)
+        warmth = try c.decodeIfPresent(MetricChannel.self, forKey: .warmth) ?? .disabled(start: 0, end: 0.25)
 
         if let mode = try c.decodeIfPresent(TransitionMode.self, forKey: .transitionMode) {
             transitionMode = mode
             transitionWidth = try c.decodeIfPresent(Double.self, forKey: .transitionWidth) ?? mode.presetWidth
         } else if let soft = try c.decodeIfPresent(Double.self, forKey: .softness) {
-            // Map legacy softness → custom width.
             transitionWidth = soft
             transitionMode = TransitionMode.nearest(to: soft)
             if abs(transitionMode.presetWidth - soft) > 0.02 {
@@ -218,6 +253,10 @@ struct ShadeSettings: Equatable, Codable {
         try c.encode(transitionMode, forKey: .transitionMode)
         try c.encode(transitionWidth, forKey: .transitionWidth)
         try c.encode(inverted, forKey: .inverted)
+        try c.encode(contrast, forKey: .contrast)
+        try c.encode(saturation, forKey: .saturation)
+        try c.encode(sharpness, forKey: .sharpness)
+        try c.encode(warmth, forKey: .warmth)
     }
 }
 
@@ -296,4 +335,5 @@ final class ShadeSettingsStore {
 
 extension Notification.Name {
     static let shadeSettingsDidChange = Notification.Name("ShadeSettingsDidChange")
+    static let shadeCapturePermissionDidChange = Notification.Name("ShadeCapturePermissionDidChange")
 }

@@ -2,9 +2,29 @@
   "angleDegrees" : 0,
   "brightOpacity" : 0,
   "center" : 0.5,
-  "dimOpacity" : 0.6,
+  "contrast" : {
+    "enabled" : false,
+    "end" : 0.35,
+    "start" : 0
+  },
+  "dimOpacity" : 0.55,
   "enabled" : true,
   "inverted" : false,
+  "saturation" : {
+    "enabled" : false,
+    "end" : -0.45,
+    "start" : 0
+  },
+  "sharpness" : {
+    "enabled" : false,
+    "end" : 0.4,
+    "start" : 0
+  },
   "transitionMode" : "short",
-  "transitionWidth" : 0.12
+  "transitionWidth" : 0.12,
+  "warmth" : {
+    "enabled" : false,
+    "end" : 0.25,
+    "start" : 0
+  }
 }

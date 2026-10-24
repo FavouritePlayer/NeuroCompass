@@ -51,6 +51,10 @@ final class StatusItemController {
         right.target = self
         menu.addItem(right)
 
+        let metrics = NSMenuItem(title: "Preset: Demo Metrics", action: #selector(presetMetrics), keyEquivalent: "3")
+        metrics.target = self
+        menu.addItem(metrics)
+
         menu.addItem(.separator())
 
         let hard = NSMenuItem(title: "Transition: Hard", action: #selector(modeHard), keyEquivalent: "")
@@ -111,6 +115,24 @@ final class StatusItemController {
             s.dimOpacity = 0.6
             s.applyTransitionMode(.short)
             s.enabled = true
+        }
+    }
+
+    @objc private func presetMetrics() {
+        let ok = overlay?.requestCapturePermission() ?? CGRequestScreenCaptureAccess()
+        ShadeSettingsStore.shared.update { s in
+            s.angleDegrees = 0
+            s.center = 0.5
+            s.brightOpacity = 0
+            s.dimOpacity = 0.15
+            s.applyTransitionMode(.short)
+            s.enabled = true
+            if ok {
+                s.contrast = MetricChannel(enabled: true, start: 0.0, end: 0.55)
+                s.saturation = MetricChannel(enabled: true, start: 0.15, end: -0.55)
+                s.sharpness = MetricChannel(enabled: true, start: 0.35, end: -0.35)
+                s.warmth = MetricChannel(enabled: true, start: -0.1, end: 0.35)
+            }
         }
     }
 

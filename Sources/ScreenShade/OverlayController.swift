@@ -1,9 +1,18 @@
 import AppKit
 
-/// Manages one click-through, borderless overlay window per connected display.
+/// Manages one click-through overlay window per display, with optional capture+filter path.
 final class OverlayController {
-    private var windows: [NSWindow] = []
+    private struct DisplayOverlay {
+        let window: NSWindow
+        let view: OverlayContentView
+        let displayID: CGDirectDisplayID
+        let capture: ScreenCaptureEngine
+    }
+
+    private var overlays: [DisplayOverlay] = []
     private var observers: [NSObjectProtocol] = []
+    private var settings = ShadeSettingsStore.shared.settings
+    private(set) var capturePermissionGranted = CGPreflightScreenCaptureAccess()
 
     init() {
         recreateWindows()
@@ -20,27 +29,74 @@ final class OverlayController {
 
     deinit {
         observers.forEach { NotificationCenter.default.removeObserver($0) }
+        // Capture engines stop when released; avoid calling @MainActor stop() from deinit.
     }
 
     func recreateWindows() {
-        windows.forEach { $0.orderOut(nil) }
-        windows.removeAll()
+        overlays.forEach {
+            $0.capture.stop()
+            $0.window.orderOut(nil)
+        }
+        overlays.removeAll()
 
         for screen in NSScreen.screens {
+            let displayID = (screen.deviceDescription[NSDeviceDescriptionKey("NSScreenNumber")] as? NSNumber)?.uint32Value ?? CGMainDisplayID()
             let window = makeOverlayWindow(for: screen)
-            windows.append(window)
+            guard let view = window.contentView as? OverlayContentView else { continue }
+            let engine = ScreenCaptureEngine()
+            engine.onPermissionChange = { [weak self] granted in
+                self?.capturePermissionGranted = granted
+                NotificationCenter.default.post(name: .shadeCapturePermissionDidChange, object: granted)
+                if !granted {
+                    // Fall back to dim-only if permission denied.
+                    ShadeSettingsStore.shared.update { s in
+                        s.contrast.enabled = false
+                        s.saturation.enabled = false
+                        s.sharpness.enabled = false
+                        s.warmth.enabled = false
+                    }
+                }
+            }
+            engine.onFrame = { [weak view] cgImage in
+                guard let view, let processed = MetricProcessor.process(cgImage: cgImage, settings: ShadeSettingsStore.shared.settings) else { return }
+                view.showFilteredFrame(processed)
+            }
+            overlays.append(DisplayOverlay(window: window, view: view, displayID: displayID, capture: engine))
             window.orderFrontRegardless()
         }
         apply(ShadeSettingsStore.shared.settings)
     }
 
     func apply(_ settings: ShadeSettings) {
-        for window in windows {
-            window.setIsVisible(settings.enabled)
-            if let view = window.contentView as? GradientOverlayView {
-                view.apply(settings)
+        self.settings = settings
+        let excludeIDs = overlays.map { CGWindowID($0.window.windowNumber) }
+
+        for overlay in overlays {
+            overlay.window.setIsVisible(settings.enabled)
+            overlay.view.apply(settings)
+
+            if settings.enabled && settings.needsScreenCapture {
+                overlay.capture.start(displayID: overlay.displayID, excludingWindowIDs: excludeIDs)
+            } else {
+                overlay.capture.stop()
+                overlay.view.clearFilteredFrame()
             }
         }
+    }
+
+    /// Ask for Screen Recording permission before enabling advanced metrics.
+    @discardableResult
+    func requestCapturePermission() -> Bool {
+        // Use the first overlay's engine (or a temporary one).
+        if let first = overlays.first {
+            let ok = first.capture.ensurePermission()
+            capturePermissionGranted = ok
+            return ok
+        }
+        let tmp = ScreenCaptureEngine()
+        let ok = tmp.ensurePermission()
+        capturePermissionGranted = ok
+        return ok
     }
 
     private func makeOverlayWindow(for screen: NSScreen) -> NSWindow {
@@ -60,19 +116,16 @@ final class OverlayController {
             .canJoinAllSpaces,
             .stationary,
             .ignoresCycle,
-            .fullScreenAuxiliary
+            .fullScreenAuxiliary,
+            .transient
         ]
-        window.sharingType = .readOnly
+        window.sharingType = .none
         window.isReleasedWhenClosed = false
-        window.collectionBehavior.insert(.transient)
 
-        let view = GradientOverlayView(frame: screen.frame)
+        let view = OverlayContentView(frame: screen.frame)
         view.apply(ShadeSettingsStore.shared.settings)
         window.contentView = view
-
-        // Cover the exact screen frame (including menu bar area).
         window.setFrame(screen.frame, display: true)
-
         return window
     }
 }
