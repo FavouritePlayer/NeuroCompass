@@ -1,0 +1,10 @@
+{
+  "angleDegrees" : 0,
+  "brightOpacity" : 0,
+  "center" : 0.5,
+  "dimOpacity" : 0.6,
+  "enabled" : true,
+  "inverted" : false,
+  "transitionMode" : "short",
+  "transitionWidth" : 0.12
+}
