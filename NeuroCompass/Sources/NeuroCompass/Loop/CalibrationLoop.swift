@@ -3,7 +3,10 @@ import Foundation
 /// Grid calibration over left-contrast multipliers.
 ///
 /// Core API: `trySetting(multiplier) → ModulationResult`
-/// Grid search sits on that API. Future step-based optimizers should only call `trySetting`
+/// Each step updates the **in-app** experiment shade immediately via `onApplyInAppShade`.
+/// ScreenShade desktop IPC is optional (`pushToDesktop`).
+///
+/// Future step-based optimizers should only call `trySetting`
 /// (see `runStepBasedOptimizerPlaceholder`).
 final class CalibrationLoop {
     static let defaultGrid: [Double] = [0.85, 1.00, 1.15, 1.30]
@@ -11,8 +14,14 @@ final class CalibrationLoop {
     private let trialEngine: TrialEngine
     private let shade: ScreenShadeDriver
     private let trialsPerSetting: Int
+
+    /// Primary: update NeuroCompass experiment-window left shade.
+    var onApplyInAppShade: ((Double) -> Void)?
     var onProgress: ((String) -> Void)?
     var onModulation: ((ModulationResult) -> Void)?
+
+    /// When true, also write `loop.json` for optional ScreenShade desktop output.
+    var pushToDesktop: Bool = false
 
     init(trialEngine: TrialEngine, shade: ScreenShadeDriver, trialsPerSetting: Int = 8) {
         self.trialEngine = trialEngine
@@ -20,12 +29,18 @@ final class CalibrationLoop {
         self.trialsPerSetting = trialsPerSetting
     }
 
-    /// Apply a contrast setting on ScreenShade, run a cued block, return measured modulation.
+    /// Apply contrast to the in-app shade, run a cued block, return measured modulation.
     func trySetting(_ multiplier: Double, mode: ExperimentMode = .adjusted) async -> ModulationResult {
-        onProgress?("Applying left-contrast ×\(String(format: "%.2f", multiplier)) → ScreenShade loop.json")
-        shade.apply(leftContrastMultiplier: multiplier, enabled: true)
-        // Brief settle so ScreenShade poll (~0.25s) picks up the file.
-        try? await Task.sleep(nanoseconds: 400_000_000)
+        onProgress?("In-app left-contrast ×\(String(format: "%.2f", multiplier))")
+        // Immediate in-window update (volunteer sees the change without ScreenShade).
+        await MainActor.run {
+            onApplyInAppShade?(multiplier)
+        }
+        if pushToDesktop {
+            shade.apply(leftContrastMultiplier: multiplier, enabled: true)
+        }
+        // One frame settle for the canvas redraw.
+        try? await Task.sleep(nanoseconds: 50_000_000)
 
         onProgress?("Running \(trialsPerSetting) cued trials @ ×\(String(format: "%.2f", multiplier))…")
         let trials = await trialEngine.runBlock(
@@ -51,7 +66,8 @@ final class CalibrationLoop {
 
         let valid = results.filter { !$0.uncertain }
         guard let best = valid.max(by: { $0.modulation < $1.modulation }) else {
-            shade.apply(leftContrastMultiplier: 1.0)
+            await MainActor.run { onApplyInAppShade?(1.0) }
+            if pushToDesktop { shade.apply(leftContrastMultiplier: 1.0) }
             return CalibrationOutcome(
                 results: results,
                 lockedMultiplier: 1.0,
@@ -60,11 +76,11 @@ final class CalibrationLoop {
             )
         }
 
-        // Uncertainty: if top two are within epsilon, treat as uncertain.
         let sorted = valid.sorted { $0.modulation > $1.modulation }
         let eps = 0.02
         if sorted.count >= 2, abs(sorted[0].modulation - sorted[1].modulation) < eps {
-            shade.apply(leftContrastMultiplier: 1.0)
+            await MainActor.run { onApplyInAppShade?(1.0) }
+            if pushToDesktop { shade.apply(leftContrastMultiplier: 1.0) }
             return CalibrationOutcome(
                 results: results,
                 lockedMultiplier: 1.0,
@@ -77,7 +93,7 @@ final class CalibrationLoop {
             )
         }
 
-        shade.apply(leftContrastMultiplier: best.multiplier)
+        await MainActor.run { onApplyInAppShade?(best.multiplier) }
         return CalibrationOutcome(
             results: results,
             lockedMultiplier: best.multiplier,
@@ -92,9 +108,7 @@ final class CalibrationLoop {
 
     /// HOOK — future step-based optimizer.
     /// Replace the body with hill-climbing / Bayesian steps that only call `trySetting`.
-    /// Do not rewrite trial or EEG plumbing when swapping search strategies.
     func runStepBasedOptimizerPlaceholder(start: Double = 1.0, maxSteps: Int = 6) async -> CalibrationOutcome {
-        // Placeholder: one evaluation at start, then defer to grid.
         _ = await trySetting(start)
         return await runGrid()
     }
@@ -107,8 +121,8 @@ final class CalibrationLoop {
         let meanR = average(rightCues.map(\.lateralization))
         let modulation = meanL - meanR
 
-        let minN = 2
-        let uncertain = leftCues.count < minN || rightCues.count < minN
+        // Need at least one clean trial per cue side; flag uncertain if either side missing.
+        let uncertain = leftCues.isEmpty || rightCues.isEmpty
 
         let leftTargets = trials.filter { $0.targetSide == "left" && $0.targetPresent }
         let rightTargets = trials.filter { $0.targetSide == "right" && $0.targetPresent }
