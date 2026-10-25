@@ -7,7 +7,9 @@ import Foundation
 /// `gain = exp(-((angleDeg - (-45)) / 18)^2)` for sound angles;
 /// **no-sound** (`angleDeg == 0`) → gain = 0 (flat laterality swing).
 ///
-/// When cue = left, PO8 > PO7 → positive lat; cue = right → negative lat.
+/// Mock attend-L / attend-R swing is tied to **trial condition side** (`cueSide`),
+/// which equals the **dot side** when a target is present — **not** a visible arrow.
+/// Left → PO8 > PO7 (positive lat); right → negative lat.
 /// Modulation = mean(lat|L) − mean(lat|R) is therefore **largest near −45°**.
 final class MockEEGSource: EEGSource {
     let sourceKind: EEGSourceKind = .mock

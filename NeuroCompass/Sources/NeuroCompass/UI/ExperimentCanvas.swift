@@ -1,7 +1,8 @@
 import AppKit
 
-/// Timing-critical stimulus surface. Same NeuroCompass look; shows active **sound angle**
-/// (no left-contrast veil — calibrated parameter is HRTF azimuth).
+/// Timing-critical stimulus surface.
+/// Participant task: watch the cross; optional HRTF chirp; report which side the **dot** flashed.
+/// No attention arrow. Sound angle badge for the operator; veil unused.
 final class ExperimentCanvas: NSView {
     private(set) var phase: TrialPhase = .idle {
         didSet { needsDisplay = true }
@@ -11,6 +12,9 @@ final class ExperimentCanvas: NSView {
     private(set) var soundAngleDeg: Double = SoundAngle.none {
         didSet { needsDisplay = true }
     }
+
+    static let instruction =
+        "A sound may play. Watch the cross. When a dot flashes, press F (left) or J (right)."
 
     func setPhase(_ phase: TrialPhase) {
         self.phase = phase
@@ -36,13 +40,11 @@ final class ExperimentCanvas: NSView {
         switch phase {
         case .idle:
             drawCenteredText("NeuroCompass — HRTF sound calibration (mock EEG)", color: .secondaryLabelColor)
+            drawInstruction(emphasized: true)
             drawAngleBadge()
-        case .fixation, .anticipatory:
+        case .fixation, .waitForDot:
             drawFixation(at: CGPoint(x: cx, y: cy))
-            drawAngleBadge()
-        case .cue(let side):
-            drawFixation(at: CGPoint(x: cx, y: cy))
-            drawCenteredText(side == .left ? "←" : "→", color: .white, fontSize: 64, yOffset: 80)
+            drawInstruction(emphasized: false)
             drawAngleBadge()
         case .target(let side):
             drawFixation(at: CGPoint(x: cx, y: cy))
@@ -50,17 +52,42 @@ final class ExperimentCanvas: NSView {
                 let x = side == .left ? cx - ecc : cx + ecc
                 drawTarget(at: CGPoint(x: x, y: cy))
             }
+            drawInstruction(emphasized: false)
             drawAngleBadge()
         case .response:
             drawFixation(at: CGPoint(x: cx, y: cy))
-            drawCenteredText("f = left · j = right", color: .systemGray, fontSize: 16, yOffset: -120)
+            drawKeyHints()
+            drawInstruction(emphasized: true)
             drawAngleBadge()
         case .feedback(let msg):
             drawCenteredText(msg, color: .white, fontSize: 48)
+            drawInstruction(emphasized: false)
             drawAngleBadge()
         case .interTrial:
+            drawInstruction(emphasized: false)
             drawAngleBadge()
         }
+    }
+
+    private func drawInstruction(emphasized: Bool) {
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: emphasized ? 15 : 13, weight: emphasized ? .semibold : .regular),
+            .foregroundColor: emphasized ? NSColor.white : NSColor.secondaryLabelColor
+        ]
+        let s = Self.instruction as NSString
+        let size = s.size(withAttributes: attrs)
+        let origin = CGPoint(x: bounds.midX - size.width / 2, y: 28)
+        s.draw(at: origin, withAttributes: attrs)
+    }
+
+    private func drawKeyHints() {
+        let attrs: [NSAttributedString.Key: Any] = [
+            .font: NSFont.systemFont(ofSize: 28, weight: .bold),
+            .foregroundColor: NSColor.systemYellow
+        ]
+        let s = "F = left     J = right" as NSString
+        let size = s.size(withAttributes: attrs)
+        s.draw(at: CGPoint(x: bounds.midX - size.width / 2, y: bounds.midY - 140), withAttributes: attrs)
     }
 
     private func drawAngleBadge() {

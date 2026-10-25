@@ -1,14 +1,19 @@
 import Foundation
 import AppKit
 
-/// Runs the cued attention protocol (design A4). Timing uses ProcessInfo.systemUptime.
+/// Dot-localization protocol (participant-facing).
+/// Timeline: fixation → optional HRTF chirp → delay → L/R dot (or catch) → F/J response.
+/// Timing uses ProcessInfo.systemUptime.
 final class TrialEngine {
     struct Timing {
-        var fixationMs: ClosedRange<Int> = 500...800
-        var cueMs: Int = 200
-        var anticipatoryMs: ClosedRange<Int> = 1000...1500
-        var targetMs: Int = 120
+        /// Static cross before anything else.
+        var fixationMs: ClosedRange<Int> = 400...700
+        /// Delay after (optional) sound until the dot — also the mock EEG window.
+        var delayMs: ClosedRange<Int> = 500...1500
+        /// Dot flash duration.
+        var targetMs: ClosedRange<Int> = 150...250
         var responseMs: Int = 1500
+        var feedbackMs: Int = 250
         var itiMs: Int = 400
     }
 
@@ -20,29 +25,35 @@ final class TrialEngine {
     private(set) var trialId = 0
     private var running = false
     private var currentSpec: TrialSpec?
+    /// Logged as cue_onset — moment of HRTF chirp (or delay start if no-sound).
     private var cueOnset: TimeInterval = 0
     private var anticipatoryStart: TimeInterval = 0
     private var anticipatoryEnd: TimeInterval = 0
     private var targetOnset: TimeInterval = 0
-    private var responseDeadline: TimeInterval = 0
-    private var responded = false
-    private var workItem: DispatchWorkItem?
 
     private let eeg: EEGSource
     private let decoder: ModulationDecoder
     private let logger: TrialLogger
+    private let audio: SpatialAudioEngine
     private let participantId: String
 
-    init(eeg: EEGSource, decoder: ModulationDecoder, logger: TrialLogger, participantId: String) {
+    init(
+        eeg: EEGSource,
+        decoder: ModulationDecoder,
+        logger: TrialLogger,
+        audio: SpatialAudioEngine,
+        participantId: String
+    ) {
         self.eeg = eeg
         self.decoder = decoder
         self.logger = logger
+        self.audio = audio
         self.participantId = participantId
     }
 
     func stop() {
         running = false
-        workItem?.cancel()
+        audio.stop()
         setPhase(.idle)
     }
 
@@ -63,59 +74,79 @@ final class TrialEngine {
                 onTrialComplete?(record)
             }
         }
+        audio.stop()
         setPhase(.idle)
         return out
     }
 
     private func makeSpec(mode: ExperimentMode, soundAngleDeg: Double, catchRate: Double) -> TrialSpec {
-        let cue: Side = Bool.random() ? .left : .right
         let isCatch = Double.random(in: 0...1) < catchRate
         if isCatch {
-            return TrialSpec(cueSide: cue, targetSide: nil, targetPresent: false, mode: mode, soundAngleDeg: soundAngleDeg)
+            // Internal side for mock EEG balance only — never shown as an arrow.
+            let internalSide: Side = Bool.random() ? .left : .right
+            return TrialSpec(
+                cueSide: internalSide,
+                targetSide: nil,
+                targetPresent: false,
+                mode: mode,
+                soundAngleDeg: soundAngleDeg
+            )
         }
-        // Balanced targets independent of cue (Posner-style validity can be added later).
-        let target: Side = Bool.random() ? .left : .right
-        return TrialSpec(cueSide: cue, targetSide: target, targetPresent: true, mode: mode, soundAngleDeg: soundAngleDeg)
+        let side: Side = Bool.random() ? .left : .right
+        // cueSide == targetSide: mock attend-L/R swing follows **dot side**, not a visual arrow.
+        return TrialSpec(
+            cueSide: side,
+            targetSide: side,
+            targetPresent: true,
+            mode: mode,
+            soundAngleDeg: soundAngleDeg
+        )
     }
 
     private func runOne(spec: TrialSpec) async -> TrialRecord? {
         currentSpec = spec
-        responded = false
         trialId += 1
-        eeg.setContext(cueSide: nil, multiplier: spec.soundAngleDeg)
+        // Condition side for mock EEG = cueSide (= dot side when present).
+        eeg.setContext(cueSide: spec.cueSide, soundAngleDeg: spec.soundAngleDeg)
 
-        // Fixation
+        // 1. Static fixation
         setPhase(.fixation)
         await sleepMs(Int.random(in: timing.fixationMs))
         guard running else { return nil }
 
-        // Cue
+        // 2. Optional short HRTF chirp (no visual arrow)
         cueOnset = now()
-        setPhase(.cue(spec.cueSide))
-        eeg.setContext(cueSide: spec.cueSide, multiplier: spec.soundAngleDeg)
-        await sleepMs(timing.cueMs)
+        if !SoundAngle.isNone(spec.soundAngleDeg) {
+            audio.playChirp(azimuthDegrees: spec.soundAngleDeg)
+        } else {
+            audio.stop()
+        }
+        // Stay on fixation while sound plays / brief settle
+        setPhase(.fixation)
+        await sleepMs(120)
         guard running else { return nil }
 
-        // Anticipatory (EEG window)
+        // 3. Delay (EEG window) — still only the cross
         anticipatoryStart = now()
-        setPhase(.anticipatory(spec.cueSide))
-        await sleepMs(Int.random(in: timing.anticipatoryMs))
+        setPhase(.waitForDot)
+        await sleepMs(Int.random(in: timing.delayMs))
         anticipatoryEnd = now()
         guard running else { return nil }
 
         let eegWindow = eeg.window(from: anticipatoryStart, to: anticipatoryEnd)
         let sample = decoder.decode(window: eegWindow)
 
-        // Target
+        // 4. Dot flash (or catch: nothing)
+        let flashMs = Int.random(in: timing.targetMs)
         targetOnset = now()
         setPhase(.target(spec.targetSide))
-        await sleepMs(timing.targetMs)
+        await sleepMs(flashMs)
         guard running else { return nil }
 
-        // Response
+        // 5. Response
         setPhase(.response(spec.targetSide))
-        responseDeadline = now() + Double(timing.responseMs) / 1000.0
-        let response = await waitForKey(until: responseDeadline)
+        let deadline = now() + Double(timing.responseMs) / 1000.0
+        let response = await waitForKey(until: deadline)
         guard running else { return nil }
 
         let (correct, rt, respOnset) = score(spec: spec, response: response)
@@ -142,8 +173,10 @@ final class TrialEngine {
             eegSource: eeg.sourceKind.rawValue
         )
         logger.append(record)
+
+        // 6. Brief feedback
         setPhase(.feedback(correct == true ? "✓" : (correct == false ? "✗" : "·")))
-        await sleepMs(250)
+        await sleepMs(timing.feedbackMs)
         setPhase(.interTrial)
         await sleepMs(timing.itiMs)
         return record
@@ -151,19 +184,15 @@ final class TrialEngine {
 
     private func score(spec: TrialSpec, response: (key: Side?, time: TimeInterval)?) -> (Bool?, Double?, Double?) {
         guard let response else {
-            // No response: incorrect if target present; correct (true reject) if catch.
             return (spec.targetPresent ? false : true, nil, nil)
         }
         let rt = (response.time - targetOnset) * 1000
         if !spec.targetPresent {
-            // False alarm if any key on catch
             return (false, rt, response.time)
         }
-        let ok = response.key == spec.targetSide
-        return (ok, rt, response.time)
+        return (response.key == spec.targetSide, rt, response.time)
     }
 
-    // Key monitoring via shared KeyMonitor
     private func waitForKey(until deadline: TimeInterval) async -> (key: Side?, time: TimeInterval)? {
         while now() < deadline {
             if let hit = KeyMonitor.shared.consume() {
@@ -196,7 +225,7 @@ final class KeyMonitor {
         remove()
         monitor = NSEvent.addLocalMonitorForEvents(matching: .keyDown) { [weak self] event in
             let t = ProcessInfo.processInfo.systemUptime
-            // f / j or left / right arrows
+            // F / J (primary) or ← / →
             switch event.keyCode {
             case 123, 3: // left arrow / f
                 self?.pending = (.left, t)

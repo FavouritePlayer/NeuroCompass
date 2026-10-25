@@ -24,13 +24,19 @@ Headphones recommended for spatial cues (`AVAudioEnvironmentNode` HRTF — not L
 | Run Neutral / No-Sound Block | Silent baseline |
 | Run Held-out Block | Separate locked + no-sound comparison |
 
-Keys: **f/←** left, **j/→** right. CSV: `~/Library/Application Support/NeuroCompass/sessions/`
+## Participant task
+
+Watch the fixation cross. A short HRTF chirp may play. When a **dot** flashes left or right, press **F** (left) or **J** (right). Catch trials (~18%): no dot — don’t press. No attention arrow.
+
+CSV: `~/Library/Application Support/NeuroCompass/sessions/`
 
 ## Mock EEG rule
 
 Deterministic peak at **−45°**:
 
 `gain = exp(-((angleDeg - (-45)) / 18)^2)` for sound angles; **no-sound** (`0`) → gain `0`.
+
+L/R laterality swing follows **dot side** (logged as `cue_side`) — not a visible arrow.
 
 Always labeled `eeg_source=mock`. Never reports live.
 
@@ -45,7 +51,7 @@ Fill these only — do not invent DSP elsewhere:
 
 ## Architecture
 
-- `SpatialAudioEngine` — HRTF via `AVAudioEnvironmentNode`
-- `TrialEngine` — A4 protocol (cue L/R, anticipatory window, targets, catch trials)
-- `CalibrationLoop.trySetting(angle)` → play HRTF + block + `ModulationResult`
-- `ExperimentCanvas` — stage chrome; sound angle badge (veil unused)
+- `SpatialAudioEngine` — HRTF chirp via `AVAudioEnvironmentNode`
+- `TrialEngine` — fixation → optional chirp → delay → L/R dot → F/J
+- `CalibrationLoop.trySetting(angle)` → block + `ModulationResult`
+- `ExperimentCanvas` — cross + dot; instruction banner; veil unused

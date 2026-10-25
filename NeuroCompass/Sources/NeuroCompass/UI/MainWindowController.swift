@@ -53,7 +53,13 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     required init?(coder: NSCoder) { fatalError() }
 
     private func wireEngine() {
-        trialEngine = TrialEngine(eeg: eeg, decoder: decoder, logger: logger, participantId: logger.participantId)
+        trialEngine = TrialEngine(
+            eeg: eeg,
+            decoder: decoder,
+            logger: logger,
+            audio: audio,
+            participantId: logger.participantId
+        )
         trialEngine.onPhaseChange = { [weak self] phase in
             self?.canvas.setPhase(phase)
         }
@@ -142,7 +148,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         eegSourceField = label("EEG source: mock")
         eegSourceField.textColor = .systemOrange
         eegSourceField.font = .boldSystemFont(ofSize: 13)
-        statusField = wrappingLabel("Same NeuroCompass flow — calibrated parameter is HRTF sound angle (mock peak −45°).")
+        statusField = wrappingLabel("Dot task: watch the cross; optional HRTF chirp; press F/J for which side the dot flashed. Mock peak −45°.")
         for v in [modeField!, angleField!, trialField!, modulationField!, eegSourceField!, statusField!] {
             stack.addArrangedSubview(v)
         }
@@ -162,7 +168,7 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         for v in [physSampleField!, physPO7Field!, physPO8Field!, physQualityField!] {
             stack.addArrangedSubview(v)
         }
-        let note = wrappingLabel("Decoder stub (RMS). Mock bias → −45°. Darkness veil disabled — sound is the knob.")
+        let note = wrappingLabel("Decoder stub (RMS). Mock L/R swing follows dot side (no arrow). Peak −45°. Veil off.")
         note.font = .systemFont(ofSize: 10)
         stack.addArrangedSubview(note)
 

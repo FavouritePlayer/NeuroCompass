@@ -74,6 +74,8 @@ struct CalibrationOutcome: Equatable {
 }
 
 struct TrialSpec: Equatable {
+    /// Internal condition side for mock EEG L/R swing — **not** a visible arrow.
+    /// When a dot is present, equals `targetSide` (dot side). On catch trials, random for balance.
     var cueSide: Side
     var targetSide: Side?
     var targetPresent: Bool
@@ -108,9 +110,11 @@ struct TrialRecord: Codable, Equatable {
 
 enum TrialPhase: Equatable {
     case idle
+    /// Fixation cross only (may coincide with HRTF chirp — no arrow).
     case fixation
-    case cue(Side)
-    case anticipatory(Side)
+    /// Delay before dot; cross only. EEG window for mock decoder.
+    case waitForDot
+    /// Dot on left/right, or nil for catch (no press).
     case target(Side?)
     case response(Side?)
     case feedback(String)

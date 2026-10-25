@@ -4,7 +4,7 @@ import Foundation
 ///
 /// Core API: `trySetting(soundAngleDeg) → ModulationResult`
 /// `0` = no-sound baseline; otherwise azimuth in degrees (e.g. −30 / −45 / −60).
-/// Each step plays an HRTF cue and updates the operator angle display.
+/// Per-trial short HRTF chirps are played by `TrialEngine` (not a continuous veil tone).
 final class CalibrationLoop {
     static let defaultGrid: [Double] = SoundAngle.grid
 
@@ -23,21 +23,16 @@ final class CalibrationLoop {
         self.trialsPerSetting = trialsPerSetting
     }
 
-    /// Apply HRTF angle (or silence), run a cued block, return measured modulation.
+    /// Apply HRTF angle (or silence), run a dot-localization block, return measured modulation.
     func trySetting(_ soundAngleDeg: Double, mode: ExperimentMode = .adjusted) async -> ModulationResult {
         let label = SoundAngle.label(soundAngleDeg)
         onProgress?("Sound setting \(label)")
         await MainActor.run {
             onApplySoundAngle?(soundAngleDeg)
         }
-        if SoundAngle.isNone(soundAngleDeg) {
-            audio.stop()
-        } else {
-            audio.play(azimuthDegrees: soundAngleDeg)
-        }
-        try? await Task.sleep(nanoseconds: 80_000_000)
+        audio.stop()
 
-        onProgress?("Running \(trialsPerSetting) cued trials @ \(label)…")
+        onProgress?("Running \(trialsPerSetting) dot trials @ \(label)…")
         let trials = await trialEngine.runBlock(
             count: trialsPerSetting,
             mode: mode,
@@ -90,9 +85,7 @@ final class CalibrationLoop {
         }
 
         await MainActor.run { onApplySoundAngle?(best.soundAngleDeg) }
-        if !SoundAngle.isNone(best.soundAngleDeg) {
-            audio.play(azimuthDegrees: best.soundAngleDeg)
-        }
+        audio.stop()
         return CalibrationOutcome(
             results: results,
             lockedAngleDeg: best.soundAngleDeg,
@@ -112,12 +105,13 @@ final class CalibrationLoop {
     }
 
     func measureModulation(soundAngleDeg: Double, trials: [TrialRecord]) -> ModulationResult {
-        let leftCues = trials.filter { $0.cueSide == "left" && !$0.artifactFlag }
-        let rightCues = trials.filter { $0.cueSide == "right" && !$0.artifactFlag }
-        let meanL = average(leftCues.map(\.lateralization))
-        let meanR = average(rightCues.map(\.lateralization))
+        // cue_side = internal condition / dot side (not a visible arrow). See TrialEngine.
+        let leftTrials = trials.filter { $0.cueSide == "left" && !$0.artifactFlag }
+        let rightTrials = trials.filter { $0.cueSide == "right" && !$0.artifactFlag }
+        let meanL = average(leftTrials.map(\.lateralization))
+        let meanR = average(rightTrials.map(\.lateralization))
         let modulation = meanL - meanR
-        let uncertain = leftCues.isEmpty || rightCues.isEmpty
+        let uncertain = leftTrials.isEmpty || rightTrials.isEmpty
 
         let leftTargets = trials.filter { $0.targetSide == "left" && $0.targetPresent }
         let rightTargets = trials.filter { $0.targetSide == "right" && $0.targetPresent }
@@ -130,7 +124,7 @@ final class CalibrationLoop {
             soundAngleDeg: soundAngleDeg,
             modulation: modulation,
             uncertain: uncertain,
-            reason: uncertain ? "Too few clean cue-L/cue-R trials" : "ok",
+            reason: uncertain ? "Too few clean left/right trials" : "ok",
             trialCount: trials.count,
             hitRateLeft: hitRate(leftTargets),
             hitRateRight: hitRate(rightTargets),
