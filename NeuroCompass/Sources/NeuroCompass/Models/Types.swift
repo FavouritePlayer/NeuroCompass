@@ -6,14 +6,14 @@ enum Side: String, Codable, CaseIterable {
 
 enum ExperimentMode: String, Codable, CaseIterable {
     case neutral
-    case leftDegraded = "left_degraded"
+    case leftDegraded = "left_degraded" // degraded-equivalent: no-sound / silent baseline block
     case adjusted
     case heldOut = "held_out"
 
     var displayName: String {
         switch self {
-        case .neutral: return "neutral"
-        case .leftDegraded: return "left-degraded"
+        case .neutral: return "neutral (no sound)"
+        case .leftDegraded: return "no-sound"
         case .adjusted: return "adjusted"
         case .heldOut: return "held-out"
         }
@@ -25,6 +25,21 @@ enum EEGSourceKind: String, Codable {
     case live
 }
 
+/// Sound setting: `nil` / use `SoundAngle.none` sentinel `0` = no-sound baseline.
+enum SoundAngle {
+    /// No HRTF cue (neutral / baseline). Stored as 0 in CSV.
+    static let none: Double = 0
+    static let grid: [Double] = [none, -30, -45, -60]
+    static let demoOptimum: Double = -45
+
+    static func label(_ deg: Double) -> String {
+        if abs(deg) < 0.001 { return "no-sound" }
+        return String(format: "%+.0f°", deg)
+    }
+
+    static func isNone(_ deg: Double) -> Bool { abs(deg) < 0.001 }
+}
+
 struct LateralizationSample: Equatable {
     var alphaPO7: Double
     var alphaPO8: Double
@@ -34,10 +49,8 @@ struct LateralizationSample: Equatable {
 }
 
 struct ModulationResult: Equatable {
-    var multiplier: Double
-    /// Primary objective: mean alpha(attend-L) − alpha(attend-R) proxy = mean lat_L − mean lat_R...
-    /// Convention: modulation = mean(lat | cue=left) − mean(lat | cue=right), steered toward
-    /// a stronger **leftward** swing (larger positive values preferred for this MVP mock).
+    /// HRTF azimuth degrees; `0` = no-sound baseline.
+    var soundAngleDeg: Double
     var modulation: Double
     var uncertain: Bool
     var reason: String
@@ -46,13 +59,18 @@ struct ModulationResult: Equatable {
     var hitRateRight: Double
     var medianRTMs: Double
     var falseAlarmRate: Double
+
+    /// Back-compat alias used in a few call sites during migration.
+    var multiplier: Double { soundAngleDeg }
 }
 
 struct CalibrationOutcome: Equatable {
     var results: [ModulationResult]
-    var lockedMultiplier: Double
+    var lockedAngleDeg: Double
     var lockedUncertain: Bool
     var message: String
+
+    var lockedMultiplier: Double { lockedAngleDeg }
 }
 
 struct TrialSpec: Equatable {
@@ -60,14 +78,14 @@ struct TrialSpec: Equatable {
     var targetSide: Side?
     var targetPresent: Bool
     var mode: ExperimentMode
-    var shaderMultiplier: Double
+    var soundAngleDeg: Double
 }
 
 struct TrialRecord: Codable, Equatable {
     var participantId: String
     var trialId: Int
     var mode: String
-    var shaderMultiplier: Double
+    var soundAngleDeg: Double
     var cueSide: String
     var targetSide: String
     var targetPresent: Bool
@@ -83,6 +101,9 @@ struct TrialRecord: Codable, Equatable {
     var alphaPo8: Double
     var lateralization: Double
     var eegSource: String
+
+    /// Legacy name kept for any external readers expecting shader_multiplier column mapping.
+    var shaderMultiplier: Double { soundAngleDeg }
 }
 
 enum TrialPhase: Equatable {

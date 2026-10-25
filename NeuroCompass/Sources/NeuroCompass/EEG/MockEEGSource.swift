@@ -2,33 +2,31 @@ import Foundation
 
 /// Labeled **mock** EEG stream (Mac default). Never reports `live`.
 ///
-/// ## Deterministic demo bias (documented rule)
-/// Response gain peaks at left-contrast multiplier **1.15**:
-/// `gain = exp(-((m - 1.15) / 0.22)^2)`
+/// ## Deterministic demo bias (sound-angle mode)
+/// Response gain peaks at HRTF angle **−45°**:
+/// `gain = exp(-((angleDeg - (-45)) / 18)^2)` for sound angles;
+/// **no-sound** (`angleDeg == 0`) → gain = 0 (flat laterality swing).
 ///
-/// When cue = left, PO8 amplitude > PO7 → positive lateralization.
-/// When cue = right, PO7 amplitude > PO8 → negative lateralization.
-/// Modulation ≈ mean(lat|cueL) − mean(lat|cueR) is therefore **largest near ×1.15**,
-/// so the grid should lock ~1.15 (or neutral if too few trials / uncertain).
-///
-/// No random noise — same cue+multiplier → same lateralization direction/strength.
+/// When cue = left, PO8 > PO7 → positive lat; cue = right → negative lat.
+/// Modulation = mean(lat|L) − mean(lat|R) is therefore **largest near −45°**.
 final class MockEEGSource: EEGSource {
     let sourceKind: EEGSourceKind = .mock
     private(set) var isConnected = false
     private(set) var qualityOK = true
     private(set) var sampleCount = 0
 
-    /// Documented peak used by the demo bias.
-    static let demoOptimumMultiplier: Double = 1.15
+    static let demoOptimumAngleDeg: Double = SoundAngle.demoOptimum
+    /// Deprecated name — same as demoOptimumAngleDeg.
+    static let demoOptimumMultiplier: Double = SoundAngle.demoOptimum
 
     private let sampleRate: Double = 250
     private var buffer: [[Double]] = Array(repeating: [], count: 8)
     private var times: [TimeInterval] = []
     private var timer: Timer?
     private var cueSide: Side?
-    private var multiplier: Double = 1.0
+    /// HRTF azimuth; 0 = no-sound.
+    private var soundAngleDeg: Double = SoundAngle.none
     private var t0: TimeInterval = 0
-    private var tickIndex: Int = 0
 
     private let po7 = 5
     private let po8 = 7
@@ -41,7 +39,6 @@ final class MockEEGSource: EEGSource {
         buffer = Array(repeating: [], count: 8)
         times = []
         sampleCount = 0
-        tickIndex = 0
         timer = Timer.scheduledTimer(withTimeInterval: 1.0 / sampleRate, repeats: true) { [weak self] _ in
             self?.tick()
         }
@@ -54,8 +51,14 @@ final class MockEEGSource: EEGSource {
     }
 
     func setContext(cueSide: Side?, multiplier: Double) {
+        // `multiplier` argument is now soundAngleDeg (0 = no-sound).
         self.cueSide = cueSide
-        self.multiplier = multiplier
+        self.soundAngleDeg = multiplier
+    }
+
+    func setContext(cueSide: Side?, soundAngleDeg: Double) {
+        self.cueSide = cueSide
+        self.soundAngleDeg = soundAngleDeg
     }
 
     func window(from start: TimeInterval, to end: TimeInterval) -> EEGWindow {
@@ -71,15 +74,19 @@ final class MockEEGSource: EEGSource {
         return EEGWindow(sampleRate: sampleRate, startTime: start, endTime: end, samples: out, source: .mock)
     }
 
-    /// Public so docs/tests can cite the same curve.
+    static func responseGain(soundAngleDeg a: Double) -> Double {
+        if SoundAngle.isNone(a) { return 0 }
+        return exp(-pow((a - demoOptimumAngleDeg) / 18.0, 2))
+    }
+
+    /// Back-compat name used by older call sites.
     static func responseGain(multiplier m: Double) -> Double {
-        exp(-pow((m - demoOptimumMultiplier) / 0.22, 2))
+        responseGain(soundAngleDeg: m)
     }
 
     private func tick() {
         let t = ProcessInfo.processInfo.systemUptime
         times.append(t)
-        tickIndex += 1
         let keep = Int(sampleRate * 10)
         if times.count > keep {
             let drop = times.count - keep
@@ -89,7 +96,7 @@ final class MockEEGSource: EEGSource {
 
         let phase = 2 * Double.pi * 10 * (t - t0)
         let base = 8.0
-        let gain = Self.responseGain(multiplier: multiplier)
+        let gain = Self.responseGain(soundAngleDeg: soundAngleDeg)
         var leftBoost = 0.0
         var rightBoost = 0.0
         if cueSide == .left {

@@ -3,7 +3,7 @@ import AppKit
 final class MainWindowController: NSWindowController, NSWindowDelegate {
     private let canvas = ExperimentCanvas()
     private var modeField: NSTextField!
-    private var multiplierField: NSTextField!
+    private var angleField: NSTextField!
     private var trialField: NSTextField!
     private var modulationField: NSTextField!
     private var eegSourceField: NSTextField!
@@ -19,26 +19,21 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
     private let eeg: EEGSource
     private let decoder: ModulationDecoder
     private let logger: TrialLogger
-    private let shade = ScreenShadeDriver()
+    private let audio = SpatialAudioEngine()
     private var trialEngine: TrialEngine!
     private var loop: CalibrationLoop!
     private var physTimer: Timer?
 
-    private(set) var currentMultiplier: Double = 1.0
+    private(set) var currentAngleDeg: Double = SoundAngle.none
     private(set) var currentMode: ExperimentMode = .neutral
-    private(set) var lastModulation: Double = 0
-    private var calibrationResults: [ModulationResult] = []
-    private var lockedMultiplier: Double?
-    private var lastCalibrationOutcome: CalibrationOutcome?
-    private var heldOutResults: [ModulationResult] = []
+    private var lockedAngleDeg: Double?
     private var busy = false
 
     init() {
-        let participant = "P001"
         let mock = MockEEGSource()
         self.eeg = mock
         self.decoder = StubModulationDecoder()
-        self.logger = TrialLogger(participantId: participant)
+        self.logger = TrialLogger(participantId: "P001")
 
         let win = NSWindow(
             contentRect: NSRect(x: 80, y: 80, width: 1100, height: 740),
@@ -52,12 +47,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         win.delegate = self
         buildUI()
         wireEngine()
-
-        if ProcessInfo.processInfo.environment["NEUROCOMPASS_DEMO_SHADE"] == "1" {
-            DispatchQueue.main.asyncAfter(deadline: .now() + 0.3) { [weak self] in
-                self?.previewDegraded()
-            }
-        }
     }
 
     @available(*, unavailable)
@@ -74,49 +63,56 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
             self.physPO7Field.stringValue = String(format: "α PO7 (stub): %.3f", record.alphaPo7)
             self.physPO8Field.stringValue = String(format: "α PO8 (stub): %.3f", record.alphaPo8)
         }
-        loop = CalibrationLoop(trialEngine: trialEngine, shade: shade, trialsPerSetting: 4)
-        loop.pushToDesktop = false
-        loop.onApplyInAppShade = { [weak self] m in
-            self?.canvas.setLeftContrastMultiplier(m)
-            self?.currentMultiplier = m
-            self?.multiplierField.stringValue = String(format: "Contrast ×%.2f (in-app)", m)
-            self?.modeField.stringValue = "Mode: \(self?.currentMode.displayName ?? "?")"
+        loop = makeLoop(trialsPerSetting: 4)
+        eeg.start()
+        KeyMonitor.shared.install()
+        applyAngle(SoundAngle.none)
+        refreshOperator()
+        physTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
+            self?.refreshPhysiology()
+        }
+    }
+
+    private func makeLoop(trialsPerSetting: Int) -> CalibrationLoop {
+        let loop = CalibrationLoop(trialEngine: trialEngine, audio: audio, trialsPerSetting: trialsPerSetting)
+        loop.onApplySoundAngle = { [weak self] a in
+            self?.applyAngle(a)
         }
         loop.onProgress = { [weak self] msg in
             DispatchQueue.main.async { self?.statusField.stringValue = msg }
         }
         loop.onModulation = { [weak self] result in
             DispatchQueue.main.async {
-                self?.lastModulation = result.modulation
                 self?.modulationField.stringValue = String(
                     format: "Modulation: %.3f%@",
                     result.modulation,
                     result.uncertain ? " (uncertain)" : ""
                 )
-                self?.currentMultiplier = result.multiplier
-                self?.multiplierField.stringValue = String(format: "Contrast ×%.2f (in-app)", result.multiplier)
-                // Live progress line in results while grid runs
-                if var text = self?.resultsView.string, text.contains("calibration") || text.contains("Running") || text.hasPrefix("(") {
+                self?.applyAngle(result.soundAngleDeg)
+                if var text = self?.resultsView.string,
+                   text.contains("calibration") || text.contains("Running") || text.hasPrefix("(") || text.hasPrefix("Running") {
+                    if text.hasPrefix("(") { text = "Running calibration:\n" }
                     let line = String(
-                        format: "  … ×%.2f → mod=%+.3f hitL=%.0f%% FA=%.0f%%%@\n",
-                        result.multiplier,
+                        format: "  %@  mod=%+.3f  hitL=%.0f%% hitR=%.0f%% medRT=%.0f FA=%.0f%%%@\n",
+                        SoundAngle.label(result.soundAngleDeg),
                         result.modulation,
                         result.hitRateLeft * 100,
+                        result.hitRateRight * 100,
+                        result.medianRTMs,
                         result.falseAlarmRate * 100,
                         result.uncertain ? " UNCERTAIN" : ""
                     )
-                    if text.hasPrefix("(") { text = "Running calibration:\n" }
                     self?.resultsView.string = text + line
                 }
             }
         }
-        eeg.start()
-        KeyMonitor.shared.install()
-        canvas.setLeftContrastMultiplier(1.0)
-        refreshOperator()
-        physTimer = Timer.scheduledTimer(withTimeInterval: 0.5, repeats: true) { [weak self] _ in
-            self?.refreshPhysiology()
-        }
+        return loop
+    }
+
+    private func applyAngle(_ deg: Double) {
+        currentAngleDeg = deg
+        canvas.setSoundAngleDeg(deg)
+        angleField?.stringValue = "Sound: \(SoundAngle.label(deg))"
     }
 
     private func buildUI() {
@@ -125,7 +121,6 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         content.layer?.backgroundColor = NSColor.windowBackgroundColor.cgColor
 
         canvas.translatesAutoresizingMaskIntoConstraints = false
-        canvas.wantsLayer = true
         content.addSubview(canvas)
 
         let sidebar = NSView()
@@ -140,27 +135,24 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         sidebar.addSubview(stack)
 
         stack.addArrangedSubview(header("Operator"))
-        modeField = label("Mode: neutral")
-        multiplierField = label("Contrast ×1.00 (in-app)")
+        modeField = label("Mode: neutral (no sound)")
+        angleField = label("Sound: no-sound")
         trialField = label("Trials: 0")
         modulationField = label("Modulation: —")
-        eegSourceField = label("EEG source: \(eeg.sourceKind.rawValue)")
-        eegSourceField.textColor = eeg.sourceKind == .mock ? .systemOrange : .systemGreen
-        statusField = wrappingLabel("Ready. In-app left shade updates each grid step. Mock peaks at ×1.15.")
-        for v in [modeField!, multiplierField!, trialField!, modulationField!, eegSourceField!, statusField!] {
+        eegSourceField = label("EEG source: mock")
+        eegSourceField.textColor = .systemOrange
+        eegSourceField.font = .boldSystemFont(ofSize: 13)
+        statusField = wrappingLabel("Same NeuroCompass flow — calibrated parameter is HRTF sound angle (mock peak −45°).")
+        for v in [modeField!, angleField!, trialField!, modulationField!, eegSourceField!, statusField!] {
             stack.addArrangedSubview(v)
         }
 
         stack.addArrangedSubview(button("Start Grid Calibration", #selector(runCalibration)))
-        stack.addArrangedSubview(button("Quick Demo Grid (2/setting)", #selector(runQuickDemo)))
-        stack.addArrangedSubview(button("Run Neutral Block (4)", #selector(runNeutral)))
-        stack.addArrangedSubview(button("Run Left-Degraded Block (4)", #selector(runDegraded)))
-        stack.addArrangedSubview(button("Preview Left-Degraded Shade", #selector(previewDegraded)))
+        stack.addArrangedSubview(button("Quick Demo Grid (3/setting)", #selector(runQuickDemo)))
+        stack.addArrangedSubview(button("Run Neutral Block (no sound)", #selector(runNeutral)))
+        stack.addArrangedSubview(button("Run No-Sound Block (4)", #selector(runNoSound)))
+        stack.addArrangedSubview(button("Preview cue at −45°", #selector(previewOptimum)))
         stack.addArrangedSubview(button("Run Held-out Block", #selector(runHeldOut)))
-
-        stack.addArrangedSubview(header("Optional desktop"))
-        stack.addArrangedSubview(button("Apply Locked → ScreenShade", #selector(applyLocked)))
-        stack.addArrangedSubview(button("ScreenShade Neutral", #selector(shadeNeutral)))
 
         stack.addArrangedSubview(header("Physiology"))
         physSampleField = label("Samples: 0")
@@ -170,47 +162,35 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         for v in [physSampleField!, physPO7Field!, physPO8Field!, physQualityField!] {
             stack.addArrangedSubview(v)
         }
-        let srcNote = wrappingLabel("Decoder stub (RMS). Plug Welch/PO7/PO8 in StubModulationDecoder. Mock bias → ×1.15.")
-        srcNote.font = .systemFont(ofSize: 10)
-        stack.addArrangedSubview(srcNote)
+        let note = wrappingLabel("Decoder stub (RMS). Mock bias → −45°. Darkness veil disabled — sound is the knob.")
+        note.font = .systemFont(ofSize: 10)
+        stack.addArrangedSubview(note)
 
         stack.addArrangedSubview(header("Results (calibration)"))
         resultsView = makeTextView()
-        resultsView.string = "(no calibration yet — run Start Grid or Quick Demo)"
-        let resultsScroll = NSScrollView()
-        resultsScroll.documentView = resultsView
-        resultsScroll.hasVerticalScroller = true
-        resultsScroll.translatesAutoresizingMaskIntoConstraints = false
-        resultsScroll.heightAnchor.constraint(equalToConstant: 150).isActive = true
+        resultsView.string = "(no calibration yet — run Quick Demo or Start Grid)"
+        let resultsScroll = wrapScroll(resultsView, height: 150)
         stack.addArrangedSubview(resultsScroll)
 
         heldOutHeader = header("Held-out (separate)")
         stack.addArrangedSubview(heldOutHeader)
         heldOutView = makeTextView()
-        heldOutView.string = "Not run yet.\nAfter calibration locks a setting, click Run Held-out Block.\nHeld-out is NEVER the same as calibration."
-        let heldScroll = NSScrollView()
-        heldScroll.documentView = heldOutView
-        heldScroll.hasVerticalScroller = true
-        heldScroll.translatesAutoresizingMaskIntoConstraints = false
-        heldScroll.heightAnchor.constraint(equalToConstant: 100).isActive = true
-        stack.addArrangedSubview(heldScroll)
+        heldOutView.string = "Not run yet.\nAfter lock, click Run Held-out Block.\nHeld-out is NEVER the same as calibration."
+        stack.addArrangedSubview(wrapScroll(heldOutView, height: 100))
 
         NSLayoutConstraint.activate([
             canvas.leadingAnchor.constraint(equalTo: content.leadingAnchor),
             canvas.topAnchor.constraint(equalTo: content.topAnchor),
             canvas.bottomAnchor.constraint(equalTo: content.bottomAnchor),
             canvas.trailingAnchor.constraint(equalTo: sidebar.leadingAnchor),
-
             sidebar.trailingAnchor.constraint(equalTo: content.trailingAnchor),
             sidebar.topAnchor.constraint(equalTo: content.topAnchor),
             sidebar.bottomAnchor.constraint(equalTo: content.bottomAnchor),
             sidebar.widthAnchor.constraint(equalToConstant: 330),
-
             stack.leadingAnchor.constraint(equalTo: sidebar.leadingAnchor, constant: 12),
             stack.trailingAnchor.constraint(equalTo: sidebar.trailingAnchor, constant: -12),
             stack.topAnchor.constraint(equalTo: sidebar.topAnchor, constant: 10),
-            resultsScroll.widthAnchor.constraint(equalTo: stack.widthAnchor),
-            heldScroll.widthAnchor.constraint(equalTo: stack.widthAnchor)
+            resultsScroll.widthAnchor.constraint(equalTo: stack.widthAnchor)
         ])
     }
 
@@ -219,296 +199,207 @@ final class MainWindowController: NSWindowController, NSWindowDelegate {
         f.font = .boldSystemFont(ofSize: 13)
         return f
     }
-
     private func label(_ t: String) -> NSTextField {
         let f = NSTextField(labelWithString: t)
         f.font = .systemFont(ofSize: 12)
         return f
     }
-
     private func wrappingLabel(_ t: String) -> NSTextField {
         let f = NSTextField(wrappingLabelWithString: t)
         f.font = .systemFont(ofSize: 11)
         f.preferredMaxLayoutWidth = 300
         return f
     }
-
     private func button(_ title: String, _ sel: Selector) -> NSButton {
         let b = NSButton(title: title, target: self, action: sel)
         b.bezelStyle = .rounded
         return b
     }
-
     private func makeTextView() -> NSTextView {
         let tv = NSTextView(frame: NSRect(x: 0, y: 0, width: 300, height: 200))
         tv.isEditable = false
-        tv.isRichText = false
         tv.font = .monospacedSystemFont(ofSize: 10, weight: .regular)
-        tv.minSize = NSSize(width: 0, height: 0)
-        tv.maxSize = NSSize(width: CGFloat.greatestFiniteMagnitude, height: CGFloat.greatestFiniteMagnitude)
         tv.isVerticallyResizable = true
-        tv.isHorizontallyResizable = false
         tv.autoresizingMask = [.width]
-        tv.textContainer?.containerSize = NSSize(width: 300, height: CGFloat.greatestFiniteMagnitude)
         tv.textContainer?.widthTracksTextView = true
-        tv.drawsBackground = true
-        tv.backgroundColor = NSColor.textBackgroundColor
+        tv.backgroundColor = .textBackgroundColor
         return tv
+    }
+    private func wrapScroll(_ tv: NSTextView, height: CGFloat) -> NSScrollView {
+        let s = NSScrollView()
+        s.documentView = tv
+        s.hasVerticalScroller = true
+        s.translatesAutoresizingMaskIntoConstraints = false
+        s.heightAnchor.constraint(equalToConstant: height).isActive = true
+        return s
     }
 
     private func refreshOperator() {
         modeField.stringValue = "Mode: \(currentMode.displayName)"
-        multiplierField.stringValue = String(format: "Contrast ×%.2f (in-app)", currentMultiplier)
+        angleField.stringValue = "Sound: \(SoundAngle.label(currentAngleDeg))"
         eegSourceField.stringValue = "EEG source: \(eeg.sourceKind.rawValue)"
         eegSourceField.textColor = eeg.sourceKind == .mock ? .systemOrange : .systemGreen
     }
 
     private func refreshPhysiology() {
         physSampleField.stringValue = "Samples: \(eeg.sampleCount) · connected=\(eeg.isConnected)"
-        physQualityField.stringValue = "Quality: \(eeg.qualityOK ? "placeholder OK" : "placeholder FAIL") · source=\(eeg.sourceKind.rawValue)"
+        physQualityField.stringValue = "Quality: \(eeg.qualityOK ? "placeholder OK" : "FAIL") · source=\(eeg.sourceKind.rawValue)"
     }
-
-    private func setBusy(_ v: Bool) { busy = v }
 
     @objc private func runCalibration() {
         guard !busy else { return }
-        runGrid(trialsPerSetting: 4, label: "Grid calibration")
+        runGrid(trials: 4, label: "Grid calibration")
     }
 
     @objc private func runQuickDemo() {
         guard !busy else { return }
-        // 3 trials/setting keeps the demo short while usually covering both cue sides.
-        runGrid(trialsPerSetting: 3, label: "Quick demo grid")
+        runGrid(trials: 3, label: "Quick demo grid")
     }
 
-    private func runGrid(trialsPerSetting: Int, label: String) {
-        setBusy(true)
+    private func runGrid(trials: Int, label: String) {
+        busy = true
         currentMode = .adjusted
         refreshOperator()
         resultsView.string = "Running \(label):\n"
-        heldOutView.string = "Held-out not started (calibration in progress)."
-        statusField.stringValue = "\(label) starting — mock optimum ×\(String(format: "%.2f", MockEEGSource.demoOptimumMultiplier))…"
-        loop = CalibrationLoop(trialEngine: trialEngine, shade: shade, trialsPerSetting: trialsPerSetting)
-        loop.pushToDesktop = false
-        loop.onApplyInAppShade = { [weak self] m in
-            self?.canvas.setLeftContrastMultiplier(m)
-            self?.currentMultiplier = m
-            self?.multiplierField.stringValue = String(format: "Contrast ×%.2f (in-app)", m)
-        }
-        loop.onProgress = { [weak self] msg in
-            DispatchQueue.main.async { self?.statusField.stringValue = msg }
-        }
-        loop.onModulation = { [weak self] result in
-            DispatchQueue.main.async {
-                self?.lastModulation = result.modulation
-                self?.modulationField.stringValue = String(
-                    format: "Modulation: %.3f%@",
-                    result.modulation,
-                    result.uncertain ? " (uncertain)" : ""
-                )
-                let line = String(
-                    format: "  ×%.2f  mod=%+.3f  hitL=%.0f%% hitR=%.0f%% medRT=%.0f FA=%.0f%%%@\n",
-                    result.multiplier,
-                    result.modulation,
-                    result.hitRateLeft * 100,
-                    result.hitRateRight * 100,
-                    result.medianRTMs,
-                    result.falseAlarmRate * 100,
-                    result.uncertain ? " UNCERTAIN" : ""
-                )
-                self?.resultsView.string += line
-            }
-        }
+        heldOutView.string = "Held-out not started."
+        statusField.stringValue = "\(label) — mock peak \(SoundAngle.label(SoundAngle.demoOptimum))"
+        loop = makeLoop(trialsPerSetting: trials)
         Task { @MainActor in
             let outcome = await self.loop.runGrid()
-            self.calibrationResults = outcome.results
-            self.lockedMultiplier = outcome.lockedMultiplier
-            self.lastCalibrationOutcome = outcome
-            self.currentMultiplier = outcome.lockedMultiplier
-            self.canvas.setLeftContrastMultiplier(outcome.lockedMultiplier)
+            self.lockedAngleDeg = outcome.lockedAngleDeg
+            self.applyAngle(outcome.lockedAngleDeg)
             self.statusField.stringValue = outcome.message
             self.refreshOperator()
             self.renderResults(outcome)
             self.logger.writeSessionMeta(
                 eegSource: self.eeg.sourceKind,
-                lockedMultiplier: outcome.lockedMultiplier,
+                lockedAngleDeg: outcome.lockedAngleDeg,
                 note: outcome.message
             )
-            self.setBusy(false)
+            self.busy = false
         }
     }
 
     @objc private func runNeutral() {
         guard !busy else { return }
-        setBusy(true)
+        busy = true
         currentMode = .neutral
-        currentMultiplier = 1.0
-        canvas.setLeftContrastMultiplier(1.0)
+        applyAngle(SoundAngle.none)
         refreshOperator()
         Task { @MainActor in
-            let r = await loop.trySetting(1.0, mode: .neutral)
-            self.appendBlockSummary(title: "Neutral block", result: r)
-            self.statusField.stringValue = "Neutral block done (in-app ×1.00)."
-            self.setBusy(false)
+            let r = await loop.trySetting(SoundAngle.none, mode: .neutral)
+            self.appendSummary("Neutral (no sound)", r)
+            self.statusField.stringValue = "Neutral block done."
+            self.busy = false
         }
     }
 
-    @objc private func runDegraded() {
+    @objc private func runNoSound() {
         guard !busy else { return }
-        setBusy(true)
+        busy = true
         currentMode = .leftDegraded
-        currentMultiplier = 0.85
-        canvas.setLeftContrastMultiplier(0.85)
+        applyAngle(SoundAngle.none)
         refreshOperator()
         Task { @MainActor in
-            let r = await loop.trySetting(0.85, mode: .leftDegraded)
-            self.appendBlockSummary(title: "Left-degraded block", result: r)
-            self.statusField.stringValue = "Left-degraded block done (in-app ×0.85)."
-            self.setBusy(false)
+            let r = await loop.trySetting(SoundAngle.none, mode: .leftDegraded)
+            self.appendSummary("No-sound block", r)
+            self.statusField.stringValue = "No-sound block done."
+            self.busy = false
         }
     }
 
-    @objc private func previewDegraded() {
-        currentMode = .leftDegraded
-        currentMultiplier = 0.85
-        canvas.setLeftContrastMultiplier(0.85)
-        canvas.setPhase(.target(.left))
+    @objc private func previewOptimum() {
+        applyAngle(SoundAngle.demoOptimum)
+        currentMode = .adjusted
         refreshOperator()
-        statusField.stringValue = "Preview: left hemifield degraded ×0.85 (right untouched)."
+        audio.play(azimuthDegrees: SoundAngle.demoOptimum)
+        statusField.stringValue = "Preview HRTF cue at −45° (mock optimum). Headphones recommended."
+        canvas.setPhase(.idle)
     }
 
-    /// Separate held-out evaluation: locked setting + one comparison. Not calibration.
     @objc private func runHeldOut() {
         guard !busy else { return }
-        guard let locked = lockedMultiplier else {
-            statusField.stringValue = "Run calibration first — held-out needs a locked setting."
-            heldOutView.string = "Blocked: no locked multiplier yet.\nRun Start Grid Calibration or Quick Demo first."
+        guard let locked = lockedAngleDeg else {
+            statusField.stringValue = "Run calibration first."
+            heldOutView.string = "Blocked: no locked angle yet."
             return
         }
-        setBusy(true)
+        busy = true
         currentMode = .heldOut
         refreshOperator()
-        heldOutView.string = "Running held-out (separate from calibration)…\n"
-        statusField.stringValue = "Held-out: locked ×\(String(format: "%.2f", locked)) + comparison ×1.00"
-        // Do not append held-out rows into the calibration results panel.
-        let savedMod = loop.onModulation
+        heldOutView.string = "Running held-out…\n"
+        heldOutHeader.stringValue = "Held-out (separate — running)"
+        let saved = loop.onModulation
         loop.onModulation = { [weak self] result in
             DispatchQueue.main.async {
                 self?.heldOutView.string += String(
-                    format: "  … ×%.2f mod=%+.3f\n",
-                    result.multiplier,
+                    format: "  … %@ mod=%+.3f\n",
+                    SoundAngle.label(result.soundAngleDeg),
                     result.modulation
                 )
             }
         }
         Task { @MainActor in
-            defer { self.loop.onModulation = savedMod }
-            // Short held-out: locked setting then neutral comparison
+            defer { self.loop.onModulation = saved }
             let lockedResult = await self.loop.trySetting(locked, mode: .heldOut)
-            let comparison = await self.loop.trySetting(1.0, mode: .heldOut)
-            self.heldOutResults = [lockedResult, comparison]
-            self.canvas.setLeftContrastMultiplier(locked)
-            self.currentMultiplier = locked
-            self.renderHeldOut(locked: locked, lockedResult: lockedResult, comparison: comparison)
-            self.logger.writeSessionMeta(
-                eegSource: self.eeg.sourceKind,
-                lockedMultiplier: locked,
-                note: "Held-out complete; calibration lock=\(locked)"
-            )
-            self.statusField.stringValue = "Held-out done. Calibration lock unchanged at ×\(String(format: "%.2f", locked))."
+            let comparison = await self.loop.trySetting(SoundAngle.none, mode: .heldOut)
+            self.applyAngle(locked)
+            self.heldOutHeader.stringValue = "Held-out (separate — complete)"
+            self.heldOutView.string = """
+            HELD-OUT (separate from calibration)
+            eeg_source=\(self.eeg.sourceKind.rawValue)
+              locked  \(SoundAngle.label(locked))  mod=\(String(format: "%+.3f", lockedResult.modulation))  hitL=\(String(format: "%.0f", lockedResult.hitRateLeft * 100))%  medRT=\(String(format: "%.0f", lockedResult.medianRTMs))
+              compare no-sound  mod=\(String(format: "%+.3f", comparison.modulation))  hitL=\(String(format: "%.0f", comparison.hitRateLeft * 100))%
+            Calibration lock unchanged at \(SoundAngle.label(locked)).
+            """
+            self.statusField.stringValue = "Held-out done. Lock \(SoundAngle.label(locked))."
             self.refreshOperator()
-            self.setBusy(false)
+            self.busy = false
         }
     }
 
-    @objc private func applyLocked() {
-        let m = lockedMultiplier ?? currentMultiplier
-        shade.apply(leftContrastMultiplier: m)
-        canvas.setLeftContrastMultiplier(m)
-        currentMultiplier = m
-        refreshOperator()
-        statusField.stringValue = String(format: "Optional desktop: wrote ×%.2f to ScreenShade loop.json", m)
-    }
-
-    @objc private func shadeNeutral() {
-        shade.setNeutral()
-        canvas.setLeftContrastMultiplier(1.0)
-        currentMultiplier = 1.0
-        canvas.setPhase(.idle)
-        refreshOperator()
-        statusField.stringValue = "In-app neutral ×1.00 (ScreenShade loop.json also reset)."
-    }
-
-    private func appendBlockSummary(title: String, result: ModulationResult) {
+    private func appendSummary(_ title: String, _ r: ModulationResult) {
         let line = String(
-            format: "%@: ×%.2f mod=%+.3f hitL=%.0f%% hitR=%.0f%% medRT=%.0f FA=%.0f%%%@\n",
-            title,
-            result.multiplier,
-            result.modulation,
-            result.hitRateLeft * 100,
-            result.hitRateRight * 100,
-            result.medianRTMs,
-            result.falseAlarmRate * 100,
-            result.uncertain ? " UNCERTAIN" : ""
+            format: "%@: %@ mod=%+.3f hitL=%.0f%% medRT=%.0f FA=%.0f%%\n",
+            title, SoundAngle.label(r.soundAngleDeg), r.modulation, r.hitRateLeft * 100, r.medianRTMs, r.falseAlarmRate * 100
         )
-        if resultsView.string.hasPrefix("(") {
-            resultsView.string = line
-        } else {
-            resultsView.string += line
-        }
+        resultsView.string = resultsView.string.hasPrefix("(") ? line : resultsView.string + line
     }
 
     private func renderResults(_ outcome: CalibrationOutcome) {
-        var lines: [String] = [
-            "CALIBRATION (not held-out)",
-            "eeg_source=\(eeg.sourceKind.rawValue)  mock_peak=×\(String(format: "%.2f", MockEEGSource.demoOptimumMultiplier))",
+        var lines = [
+            "CALIBRATION (sound angle — not held-out)",
+            "eeg_source=\(eeg.sourceKind.rawValue)  mock_peak=\(SoundAngle.label(SoundAngle.demoOptimum))",
             "modulation per setting:"
         ]
         for r in outcome.results {
             lines.append(String(
-                format: "  ×%.2f  mod=%+.3f  hitL=%.0f%% hitR=%.0f%% medRT=%.0f FA=%.0f%%  %@%@",
-                r.multiplier,
+                format: "  %@  mod=%+.3f  hitL=%.0f%% hitR=%.0f%% medRT=%.0f FA=%.0f%%  %@%@",
+                SoundAngle.label(r.soundAngleDeg),
                 r.modulation,
                 r.hitRateLeft * 100,
                 r.hitRateRight * 100,
                 r.medianRTMs,
                 r.falseAlarmRate * 100,
                 r.uncertain ? "UNCERTAIN " : "",
-                abs(r.multiplier - outcome.lockedMultiplier) < 0.001 ? "← LOCKED" : ""
+                abs(r.soundAngleDeg - outcome.lockedAngleDeg) < 0.001 ? "← LOCKED" : ""
             ))
         }
         lines.append(outcome.message)
-        lines.append(String(
-            format: "Locked ×%.2f%@ | CSV: %@",
-            outcome.lockedMultiplier,
-            outcome.lockedUncertain ? " (uncertain→neutral)" : "",
-            logger.sessionDirectory.path
-        ))
+        lines.append("CSV: \(logger.sessionDirectory.path)")
         resultsView.string = lines.joined(separator: "\n")
-
-        heldOutView.string = """
-        Held-out NOT run yet (this panel is separate).
-        Calibration locked ×\(String(format: "%.2f", outcome.lockedMultiplier)).
-        Click “Run Held-out Block” for a separate locked + comparison evaluation.
-        Do not treat the numbers above as held-out.
-        """
         heldOutHeader.stringValue = "Held-out (separate — not run)"
-    }
-
-    private func renderHeldOut(locked: Double, lockedResult: ModulationResult, comparison: ModulationResult) {
-        heldOutHeader.stringValue = "Held-out (separate — complete)"
         heldOutView.string = """
-        HELD-OUT (separate from calibration)
-        eeg_source=\(eeg.sourceKind.rawValue)
-          locked  ×\(String(format: "%.2f", locked))  mod=\(String(format: "%+.3f", lockedResult.modulation))  hitL=\(String(format: "%.0f", lockedResult.hitRateLeft * 100))%  medRT=\(String(format: "%.0f", lockedResult.medianRTMs))  FA=\(String(format: "%.0f", lockedResult.falseAlarmRate * 100))%
-          compare ×1.00  mod=\(String(format: "%+.3f", comparison.modulation))  hitL=\(String(format: "%.0f", comparison.hitRateLeft * 100))%  medRT=\(String(format: "%.0f", comparison.medianRTMs))  FA=\(String(format: "%.0f", comparison.falseAlarmRate * 100))%
-        Calibration lock unchanged at ×\(String(format: "%.2f", locked)).
+        Held-out NOT run yet.
+        Calibration locked \(SoundAngle.label(outcome.lockedAngleDeg)).
+        Click “Run Held-out Block” for a separate locked + no-sound comparison.
         """
     }
 
     func windowWillClose(_ notification: Notification) {
         trialEngine.stop()
         eeg.stop()
+        audio.shutdown()
         KeyMonitor.shared.remove()
         physTimer?.invalidate()
     }

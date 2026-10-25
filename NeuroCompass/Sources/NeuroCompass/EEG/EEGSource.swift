@@ -21,10 +21,13 @@ protocol EEGSource: AnyObject {
     func stop()
     /// Extract samples overlapping [start, end] in the same monotonic clock as the task.
     func window(from start: TimeInterval, to end: TimeInterval) -> EEGWindow
-    /// Optional: inform mock stream of current cue / multiplier so it can synthesize a response.
+    /// Inform mock stream of cue + sound angle (0 = no-sound) so it can synthesize a response.
     func setContext(cueSide: Side?, multiplier: Double)
 }
 
 extension EEGSource {
     func setContext(cueSide: Side?, multiplier: Double) {}
+    func setContext(cueSide: Side?, soundAngleDeg: Double) {
+        setContext(cueSide: cueSide, multiplier: soundAngleDeg)
+    }
 }

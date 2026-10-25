@@ -50,14 +50,14 @@ final class TrialEngine {
     func runBlock(
         count: Int,
         mode: ExperimentMode,
-        multiplier: Double,
+        soundAngleDeg: Double,
         catchRate: Double = 0.18
     ) async -> [TrialRecord] {
         running = true
         var out: [TrialRecord] = []
         for _ in 0..<count {
             guard running else { break }
-            let spec = makeSpec(mode: mode, multiplier: multiplier, catchRate: catchRate)
+            let spec = makeSpec(mode: mode, soundAngleDeg: soundAngleDeg, catchRate: catchRate)
             if let record = await runOne(spec: spec) {
                 out.append(record)
                 onTrialComplete?(record)
@@ -67,22 +67,22 @@ final class TrialEngine {
         return out
     }
 
-    private func makeSpec(mode: ExperimentMode, multiplier: Double, catchRate: Double) -> TrialSpec {
+    private func makeSpec(mode: ExperimentMode, soundAngleDeg: Double, catchRate: Double) -> TrialSpec {
         let cue: Side = Bool.random() ? .left : .right
         let isCatch = Double.random(in: 0...1) < catchRate
         if isCatch {
-            return TrialSpec(cueSide: cue, targetSide: nil, targetPresent: false, mode: mode, shaderMultiplier: multiplier)
+            return TrialSpec(cueSide: cue, targetSide: nil, targetPresent: false, mode: mode, soundAngleDeg: soundAngleDeg)
         }
         // Balanced targets independent of cue (Posner-style validity can be added later).
         let target: Side = Bool.random() ? .left : .right
-        return TrialSpec(cueSide: cue, targetSide: target, targetPresent: true, mode: mode, shaderMultiplier: multiplier)
+        return TrialSpec(cueSide: cue, targetSide: target, targetPresent: true, mode: mode, soundAngleDeg: soundAngleDeg)
     }
 
     private func runOne(spec: TrialSpec) async -> TrialRecord? {
         currentSpec = spec
         responded = false
         trialId += 1
-        eeg.setContext(cueSide: nil, multiplier: spec.shaderMultiplier)
+        eeg.setContext(cueSide: nil, multiplier: spec.soundAngleDeg)
 
         // Fixation
         setPhase(.fixation)
@@ -92,7 +92,7 @@ final class TrialEngine {
         // Cue
         cueOnset = now()
         setPhase(.cue(spec.cueSide))
-        eeg.setContext(cueSide: spec.cueSide, multiplier: spec.shaderMultiplier)
+        eeg.setContext(cueSide: spec.cueSide, multiplier: spec.soundAngleDeg)
         await sleepMs(timing.cueMs)
         guard running else { return nil }
 
@@ -124,7 +124,7 @@ final class TrialEngine {
             participantId: participantId,
             trialId: trialId,
             mode: spec.mode.rawValue,
-            shaderMultiplier: spec.shaderMultiplier,
+            soundAngleDeg: spec.soundAngleDeg,
             cueSide: spec.cueSide.rawValue,
             targetSide: spec.targetSide?.rawValue ?? "none",
             targetPresent: spec.targetPresent,

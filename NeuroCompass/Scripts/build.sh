@@ -21,6 +21,7 @@ echo "==> Compiling NeuroCompass (${#SWIFT_FILES[@]} files)"
 swiftc -sdk "$SDK" \
   -target arm64-apple-macos13.0 \
   -framework AppKit \
+  -framework AVFoundation \
   -O \
   -o "$MACOS/NeuroCompass" \
   "${SWIFT_FILES[@]}"
